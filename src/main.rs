@@ -3,10 +3,10 @@ use dotenv::dotenv;
 use std::env;
 
 use teloxide::prelude::*;
-use teloxide::types::ChatId;
+use teloxide::types::{ChatId, LinkPreviewOptions};
+use teloxide::utils::markdown::escape;
 
 use axum::{
-    body::Bytes,
     extract::State, routing::post,
     Json, Router
 };
@@ -15,9 +15,6 @@ use serde::Deserialize;
 
 use std::sync::Arc;
 use tokio::sync::Mutex;
-
-use std::fs::File;
-use std::io::Write;
 
 #[derive(Clone)]
 struct AppState {
@@ -39,41 +36,55 @@ impl AppState {
 
         println!("Sending {} to channel {}", message, self.chat_id);
 
-        let res = bot.send_message(chat_id, message)
-            .parse_mode(teloxide::types::ParseMode::MarkdownV2)
-            .await;
-        match res {
+        let mut message = bot.send_message(chat_id, message)
+            .parse_mode(teloxide::types::ParseMode::MarkdownV2);
+
+        message.link_preview_options = Some(LinkPreviewOptions {
+            is_disabled: true,
+            url: None,
+            prefer_small_media: false,
+            prefer_large_media: false,
+            show_above_text: false,
+        });
+
+
+
+        match message.await {
             Err(e) => println!("{}", e),
             _ => (),
         }
     }
 }
 
-
 #[derive(Debug, Deserialize)]
 struct GHWebhookPayload {
     pusher: Pusher,
     commits: Vec<Commit>,
     repository: Repository,
+    sender: Sender,
+}
+
+#[derive(Debug, Deserialize)]
+struct Sender {
+    login: String,
+    html_url: String,
 }
 
 #[derive(Debug, Deserialize)]
 struct Pusher {
     name: String,
-    email: String,
 }
 
 #[derive(Debug, Deserialize)]
 struct Commit {
-    id: String,
     message: String,
     url: String,
 }
 
 #[derive(Debug, Deserialize)]
 struct Repository {
-    name: String,
     full_name: String,
+    html_url: String,
 }
 
 #[tokio::main]
@@ -102,23 +113,18 @@ async fn main() {
 
     println!("Listening on {}", addr);
 
-    app_state.send_message("Bot started".to_string()).await;
-
     let app = Router::new()
         .route("/webhook", post(github_webhook))
-        .route("/save", post(save_webhook))
         .with_state(app_state);
 
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
-
 }
 
-async fn save_webhook(body : Bytes) {
-    let content = String::from_utf8(body.to_vec()).unwrap();
-    let mut file = File::create("saved_hook").unwrap();
-    file.write_all(content.as_bytes()).unwrap();
-
+fn format_link(link_text: &String, link_url: &String) -> String {
+    let escaped_text = escape(link_text);
+    let escaped_url = escape(link_url);
+    format!("[{escaped_text}]({escaped_url})")
 }
 
 async fn github_webhook(
@@ -126,17 +132,19 @@ async fn github_webhook(
     Json(payload): Json<GHWebhookPayload>,
 ) {
 
-    let message = format!(
-        "New push to *{}* by {}:\n\n{}",
-        payload.repository.full_name,
-        payload.pusher.name,
+    let link_to_repo = format_link(&payload.repository.full_name, &payload.repository.html_url);
+
+    let link_to_sender = format_link(&payload.sender.login, &payload.sender.html_url);
+
+    let formatted_commits =
         payload
-            .commits
-            .iter()
-            .map(|commit| format!("• [{}]({})", commit.message, commit.url))
-            .collect::<Vec<String>>()
-            .join("\n")
-    );
+        .commits
+        .iter()
+        .map(|commit| format!("• {}", format_link(&commit.message, &commit.url)))
+        .collect::<Vec<String>>()
+        .join("\n");
+
+    let message = format!( "New push to {link_to_repo} by {link_to_sender}:\n\n{formatted_commits}");
 
     println!("{}", &message);
 
